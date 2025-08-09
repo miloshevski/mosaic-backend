@@ -13,11 +13,11 @@ app = FastAPI()
 # ✅ CORS: дозволи локален дев + Vercel
 origins = [
     "http://localhost:3000",
-    "https://your-frontend.vercel.app",  # смени со твојот точен домен
+    "https://mosaic-frontend-six.vercel.app/", 
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # ["*"] само за тест
+    allow_origins=["*"],  # ["*"] само за тест
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
