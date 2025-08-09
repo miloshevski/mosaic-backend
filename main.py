@@ -1,8 +1,6 @@
 import os
-import io
 import cv2
 import zipfile
-import shutil
 import tempfile
 import numpy as np
 from glob import glob
@@ -12,17 +10,20 @@ from fastapi.responses import Response, JSONResponse
 
 app = FastAPI()
 
-# Allow CORS from your Vercel domain while testing you can use "*"
+# ✅ CORS: дозволи локален дев + Vercel
+origins = [
+    "http://localhost:3000",
+    "https://your-frontend.vercel.app",  # смени со твојот точен домен
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # set to ["https://your-app.vercel.app"] in prod
+    allow_origins=origins,  # ["*"] само за тест
     allow_credentials=True,
-    allow_methods=["*"]
-    ,allow_headers=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ========= Your OpenCV helpers =========
-
+# ========= Utility =========
 def average_lab(img_bgr: np.ndarray) -> np.ndarray:
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     return lab.reshape(-1, 3).mean(axis=0)
@@ -34,8 +35,7 @@ def load_tiles(tiles_dir: str, tile_size: int):
     if not paths:
         raise FileNotFoundError("No tile images found in tiles_dir")
 
-    tiles_small = []
-    tiles_lab = []
+    tiles_small, tiles_lab = [], []
     for p in paths:
         img = cv2.imread(p)
         if img is None:
@@ -49,11 +49,10 @@ def load_tiles(tiles_dir: str, tile_size: int):
         tiles_small.append(img_resized)
         tiles_lab.append(average_lab(img_resized))
 
-    if len(tiles_small) == 0:
+    if not tiles_small:
         raise RuntimeError("Failed to load any valid tile images.")
 
     return np.array(tiles_small), np.array(tiles_lab, dtype=np.float32)
-
 
 def build_mosaic_bytes(
     target_bytes: bytes,
@@ -63,7 +62,6 @@ def build_mosaic_bytes(
     no_immediate_repeat: bool = True,
     max_width: int = 800,
 ) -> bytes:
-    # Read target image from bytes
     file_bytes = np.frombuffer(target_bytes, np.uint8)
     target_original = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     if target_original is None:
@@ -102,18 +100,25 @@ def build_mosaic_bytes(
                 dists[last_used_idx] += 5.0
 
             idx = int(np.argmin(dists))
-            tile_img = tiles_small[idx]
-            mosaic[y0:y1, x0:x1] = tile_img
+            mosaic[y0:y1, x0:x1] = tiles_small[idx]
             last_used_idx = idx
 
     if blend > 0:
         mosaic = cv2.addWeighted(mosaic, 1 - blend, target, blend, 0)
 
-    # Encode to JPEG bytes
     ok, buf = cv2.imencode('.jpg', mosaic, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     if not ok:
         raise RuntimeError("Failed to encode mosaic to JPEG")
     return buf.tobytes()
+
+# ========= Extra routes =========
+@app.get("/")
+def root():
+    return {"status": "ok", "endpoints": ["/api/health", "/api/mosaic", "/docs"]}
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
 
 # ========= API endpoint =========
 @app.post("/api/mosaic")
@@ -131,7 +136,6 @@ async def make_mosaic(
             tiles_dir = os.path.join(tmpdir, "tiles")
             os.makedirs(tiles_dir, exist_ok=True)
 
-            # Option A: ZIP of tiles
             if tiles_zip is not None:
                 zbytes = await tiles_zip.read()
                 zpath = os.path.join(tmpdir, "tiles.zip")
@@ -140,17 +144,13 @@ async def make_mosaic(
                 with zipfile.ZipFile(zpath, 'r') as zf:
                     zf.extractall(tiles_dir)
 
-            # Option B: multiple individual files
             if tiles_files:
                 for up in tiles_files:
                     b = await up.read()
-                    # store using original filename
                     fname = os.path.basename(up.filename or "tile.jpg")
-                    out = os.path.join(tiles_dir, fname)
-                    with open(out, "wb") as f:
+                    with open(os.path.join(tiles_dir, fname), "wb") as f:
                         f.write(b)
 
-            # Build mosaic
             mosaic_jpg = build_mosaic_bytes(
                 target_bytes=await target.read(),
                 tiles_dir=tiles_dir,
@@ -160,6 +160,7 @@ async def make_mosaic(
                 max_width=max_width,
             )
             return Response(content=mosaic_jpg, media_type="image/jpeg")
+
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
